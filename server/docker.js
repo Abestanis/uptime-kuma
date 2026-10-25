@@ -5,11 +5,21 @@ const fsAsync = require("fs").promises;
 const path = require("path");
 const Database = require("./database");
 const { axiosAbortSignal, fsExists } = require("./util-server");
+const { setTimeout: sleep } = require('node:timers/promises');
 
 class DockerHost {
     static CertificateFileNameCA = "ca.pem";
     static CertificateFileNameCert = "cert.pem";
     static CertificateFileNameKey = "key.pem";
+    /**
+     * Map of Docker host IDs to their respective container change listeners.
+     * @type {Map<number, {controller: AbortController, task: Promise<void>}>}
+     */
+    static containerChangeListeners = new Map();
+    /**
+     * Indicates whether the server is shutting down. When true, to more event listeners will be started.
+     */
+    static shuttingDown = false;
 
     /**
      * Save a docker host
@@ -36,8 +46,12 @@ class DockerHost {
         bean.docker_type = dockerHost.dockerType;
         bean.name = dockerHost.name;
         bean.auto_sync = dockerHost.autoSync === true;
+        await DockerHost.stopContainerChangeListener(bean.id);
 
         await R.store(bean);
+        if (bean.auto_sync) {
+            await DockerHost.startContainerChangeListener(bean, DockerHost.onContainerUpdate);
+        }
 
         return bean;
     }
@@ -57,7 +71,9 @@ class DockerHost {
 
         // Delete removed proxy from monitors if exists
         await R.exec("UPDATE monitor SET docker_host = null WHERE docker_host = ?", [dockerHostID]);
-
+        if (bean.auto_sync) {
+            await DockerHost.stopContainerChangeListener(dockerHostID);
+        }
         await R.trash(bean);
     }
 
@@ -173,6 +189,181 @@ class DockerHost {
             ...baseOptions,
             ...certOptions,
         };
+    }
+
+    /**
+     * Listen for container changes on the Docker host until cancelled.
+     * @param {object} dockerHost Docker host to listen for container changes
+     * @param {(dockerHostID: number, containerData: {id: string, name: string|undefined, labels: Record<string, string>}) => Promise<void>} onUpdate Callback function to call when a container has changed
+     * @param {AbortSignal} cancelSignal Signal to cancel the operation
+     * @returns {Promise<void>} The listener task.
+     */
+    static async listenForContainerChanges(dockerHost, onUpdate, cancelSignal) {
+        const streamOptions = {
+            method: "GET",
+            url: "/events",
+            params: {
+                filters: JSON.stringify({
+                    type: ["container"],
+                    event: ["create", "rename", "update"],
+                }),
+            },
+            responseType: "stream",
+            signal: cancelSignal,
+        };
+        const requestOptions = {
+            url: "/containers/json?all=true",
+            timeout: 5000,
+            headers: {
+                Accept: "*/*",
+            },
+            signal: cancelSignal,
+        };
+
+        if (dockerHost.dockerType === "socket") {
+            streamOptions.socketPath = dockerHost.dockerDaemon;
+            requestOptions.socketPath = dockerHost.dockerDaemon;
+        } else if (dockerHost.dockerType === "tcp") {
+            const baseURL = DockerHost.patchDockerURL(dockerHost.dockerDaemon);
+            const httpsAgent = new https.Agent(
+                await DockerHost.getHttpsAgentOptions(dockerHost.dockerType, baseURL)
+            );
+            streamOptions.baseURL = baseURL;
+            streamOptions.httpsAgent = httpsAgent;
+            requestOptions.baseURL = baseURL;
+            requestOptions.httpsAgent = httpsAgent;
+        } else {
+            throw new Error("Unsupported Docker connection type");
+        }
+
+        while (!cancelSignal.aborted) {
+            try {
+                // Start listening for events.
+                const stream = await axios.request(streamOptions);
+                if (cancelSignal.aborted) {
+                    stream.data.destroy();
+                } else {
+                    cancelSignal.addEventListener("abort", () => { stream.data.destroy(); }, { once: true });
+                }
+
+                // Fetch the current list of containers.
+                let response = await axios.request(requestOptions);
+                if (!Array.isArray(response.data) || (response.data.length > 0 && !("ImageID" in response.data[0]))) {
+                    throw new Error(`Invalid Docker response from ${dockerHost.dockerDaemon}, is it Docker really a daemon?`);
+                }
+                for (const container of response.data) {
+                    await onUpdate(dockerHost.id, {
+                        id: container.Id,
+                        name: container.Names[0]?.replace(/^\//, ''), // Remove leading slash from container name
+                        labels: container.Labels || {}
+                    });
+                }
+
+                // Process events from the stream. Each line is a JSON object representing an event.
+                let buffer = "";
+                for await (const chunk of stream.data) {
+                    buffer += chunk.toString("utf8");
+
+                    let newline;
+                    while ((newline = buffer.indexOf("\n")) !== -1) {
+                        const line = buffer.slice(0, newline).trim();
+                        buffer = buffer.slice(newline + 1);
+                        if (!line) {
+                            continue;
+                        }
+                        const event = JSON.parse(line);
+                        if (event.Type === "container") {
+                            const { name, ...labels } = event.Actor.Attributes;
+                            await onUpdate(dockerHost.id, {
+                                id: event.Actor.ID,
+                                name,
+                                labels
+                            });
+                        }
+                    }
+                }
+                break;
+            } catch (error) {
+                if (!cancelSignal.aborted) {
+                    console.error(`Error while listening for Docker container events on ${dockerHost.dockerDaemon}:`, error);
+                    await sleep(5000, undefined, { signal: cancelSignal }).catch(() => { });
+                }
+            }
+        }
+    }
+
+    /**
+     * Start listening for container changes on the Docker host.
+     * @param {object} dockerHost Docker host to listen for container changes
+     * @param {(dockerHostID: number, containerData: {id: string, name: string|undefined, labels: Record<string, string>}) => Promise<void>} onUpdate Callback function to call when a container has changed
+     * @returns {Promise<void>}
+     */
+    static async startContainerChangeListener(dockerHost, onUpdate) {
+        const id = dockerHost.id;
+
+        while (DockerHost.containerChangeListeners.has(id)) {
+            await DockerHost.stopContainerChangeListener(id);
+        }
+        if (DockerHost.shuttingDown) {
+            return;
+        }
+        const controller = new AbortController();
+        const task = DockerHost.listenForContainerChanges(dockerHost, onUpdate, controller.signal).catch((error) => {
+            if (!controller.signal.aborted) {
+                console.error(`Docker container listener failed for host ${dockerHost.dockerDaemon}:`, error);
+            }
+        });
+        DockerHost.containerChangeListeners.set(id, { controller, task });
+    }
+
+    /**
+     * Stop listening for container changes on the Docker host.
+     * @param {number} dockerHostID ID of the Docker host to stop listening for.
+     * @returns {Promise<void>}
+     */
+    static async stopContainerChangeListener(dockerHostID) {
+        const listener = DockerHost.containerChangeListeners.get(dockerHostID);
+
+        if (!listener) {
+            return;
+        }
+        DockerHost.containerChangeListeners.delete(dockerHostID);
+        listener.controller.abort();
+        await listener.task;
+    }
+
+    /**
+     * Stop all Docker container listeners.
+     * @returns {Promise<void>}
+     */
+    static async stopAllContainerChangeListeners() {
+        const listeners = [...DockerHost.containerChangeListeners.values()];
+        DockerHost.containerChangeListeners.clear();
+
+        for (const listener of listeners) {
+            listener.controller.abort();
+        }
+        await Promise.allSettled(listeners.map((listener) => listener.task));
+    }
+
+
+    static async startAllContainerChangeListeners() {
+        const hosts = await R.find("docker_host");
+        for (const bean of hosts) {
+            if (bean.auto_sync) {
+                await DockerHost.startContainerChangeListener(bean, DockerHost.onContainerUpdate);
+            }
+        }
+
+    }
+
+    static async onContainerUpdate(dockerHostID, container) {
+        let bean = await R.findOne("docker_host", " id = ? ", [dockerHostID]);
+        if (!bean) {
+            return;
+        }
+
+        console.log(`Container change detected on Docker host ${bean.docker_daemon}:`, container);
     }
 }
 

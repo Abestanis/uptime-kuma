@@ -105,6 +105,7 @@ log.debug("server", "Importing prometheus-api-metrics");
 const prometheusAPIMetrics = require("prometheus-api-metrics");
 const { passwordStrength } = require("check-password-strength");
 const TranslatableError = require("./translatable-error");
+const { DockerHost } = require("./docker");
 
 log.debug("server", "Importing 2FA Modules");
 const notp = require("notp");
@@ -248,6 +249,7 @@ let needSetup = false;
 
     // Database should be ready now
     await server.initAfterDatabaseReady();
+    await DockerHost.startAllContainerChangeListeners();
     server.entryPage = await Settings.get("entryPage");
     await StatusPage.loadDomainMappingList();
 
@@ -1980,6 +1982,9 @@ async function startMonitors() {
 async function shutdownFunction(signal) {
     log.info("server", "Shutdown requested");
     log.info("server", "Called signal: " + signal);
+
+    DockerHost.shuttingDown = true;
+    await DockerHost.stopAllContainerChangeListeners();
 
     await server.stop();
 
