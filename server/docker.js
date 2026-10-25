@@ -35,6 +35,7 @@ class DockerHost {
         bean.docker_daemon = dockerHost.dockerDaemon;
         bean.docker_type = dockerHost.dockerType;
         bean.name = dockerHost.name;
+        bean.auto_sync = dockerHost.autoSync === true;
 
         await R.store(bean);
 

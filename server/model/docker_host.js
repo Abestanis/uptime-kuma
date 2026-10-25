@@ -12,6 +12,7 @@ class DockerHost extends BeanModel {
             dockerDaemon: this.docker_daemon,
             dockerType: this.docker_type,
             name: this.name,
+            autoSync: Boolean(this.auto_sync),
         };
     }
 }

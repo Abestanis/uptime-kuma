@@ -48,6 +48,20 @@
                                 </ul>
                             </i18n-t>
                         </div>
+
+                        <div class="mb-3">
+                            <div class="form-check form-switch">
+                                <label for="docker-auto-sync" class="form-check-label">
+                                    {{ $t("Automatically sync containers") }}
+                                </label>
+                                <input
+                                    id="docker-auto-sync"
+                                    v-model="dockerHost.autoSync"
+                                    class="form-check-input"
+                                    type="checkbox"
+                                />
+                            </div>
+                        </div>
                     </div>
 
                     <div class="modal-footer">
@@ -150,6 +164,7 @@ export default {
                     name: "",
                     dockerType: "socket",
                     dockerDaemon: "/var/run/docker.sock",
+                    autoSync: false,
                 };
             }
 
