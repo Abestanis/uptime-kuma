@@ -21,7 +21,7 @@ dayjs.extend(require("dayjs/plugin/customParseFormat"));
 // Load environment variables from `.env`
 try {
     loadEnvFile();
-} catch (_) {}
+} catch (_) { }
 
 // Check Node.js Version
 const nodeVersion = process.versions.node;
@@ -228,6 +228,7 @@ app.use(function (req, res, next) {
 
     // Database should be ready now
     await server.initAfterDatabaseReady();
+    await DockerHost.startAllContainerChangeListeners();
     server.entryPage = await Settings.get("entryPage");
     await StatusPage.loadDomainMappingList();
 
@@ -1564,6 +1565,9 @@ async function startMonitors() {
 async function shutdownFunction(signal) {
     log.info("server", "Shutdown requested");
     log.info("server", "Called signal: " + signal);
+
+    DockerHost.shuttingDown = true;
+    await DockerHost.stopAllContainerChangeListeners();
 
     await server.stop();
 
