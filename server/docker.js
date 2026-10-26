@@ -189,7 +189,7 @@ class DockerHost {
                         name: container.Names[0]?.replace(/^\//, ''), // Remove leading slash from container name
                         labels: container.Labels || {}
                     }).catch((error) => {
-                        console.error(`Error processing container ${container.Id}change on Docker host ${dockerHost.dockerDaemon}:`, error);
+                        console.error(`Error processing container ${container.Id} change on Docker host ${dockerHost.dockerDaemon}:`, error);
                     });
                 }
 
@@ -213,7 +213,7 @@ class DockerHost {
                                 name,
                                 labels
                             }).catch((error) => {
-                                console.error(`Error processing container ${container.Id}change on Docker host ${dockerHost.dockerDaemon}:`, error);
+                                console.error(`Error processing container ${container.Id} change on Docker host ${dockerHost.dockerDaemon}:`, error);
                             });
                         }
                     }
@@ -324,7 +324,9 @@ class DockerHost {
 
         const server = UptimeKumaServer.getInstance();
         for (const socket of server.io.sockets.sockets.values()) {
-            await server.sendUpdateMonitorIntoList(socket, bean.id);
+            if (socket.userID === userID) {
+                await server.sendUpdateMonitorIntoList(socket, bean.id);
+            }
         }
     }
 }
