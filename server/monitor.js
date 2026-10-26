@@ -2,6 +2,22 @@ const { R } = require("redbean-node");
 const { getRandomInt, log, sleep } = require("../src/util");
 const { UptimeKumaServer } = require("./uptime-kuma-server");
 
+
+/**
+ * Check if a given user owns a specific monitor
+ * @param {number} userID ID of user to check
+ * @param {number} monitorID ID of monitor to check
+ * @returns {Promise<void>}
+ * @throws {Error} The specified user does not own the monitor
+ */
+async function checkOwner(userID, monitorID) {
+    let row = await R.getRow("SELECT id FROM monitor WHERE id = ? AND user_id = ? ", [monitorID, userID]);
+
+    if (!row) {
+        throw new Error("You do not own this monitor.");
+    }
+}
+
 /**
  * Start the specified monitor
  * @param {number|undefined} userID ID of user who owns monitor

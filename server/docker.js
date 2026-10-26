@@ -294,14 +294,20 @@ class DockerHost {
     }
 
     static async onContainerUpdate(dockerHostID, container) {
+        const docker = await R.findOne("docker_host", " id = ? ", [dockerHostID]);
+        if (!docker) {
+            throw new Error("docker host not found");
+        }
+        const userID = docker.user_id;
         const containerID = container.name || container.id;
-        let bean = await R.findOne("monitor", " type = 'docker' AND docker_container = ? AND docker_host = ? ", [containerID, dockerHostID]);
+        let bean = await R.findOne("monitor", " type = 'docker' AND docker_container = ? AND docker_host = ? AND user_id = ? ", [containerID, dockerHostID, userID]);
         const newMonitor = !bean;
         if (newMonitor) {
             bean = R.dispense("monitor");
             bean.type = "docker";
             bean.name = containerID;
         }
+        bean.user_id = userID;
         bean.docker_container = containerID;
         bean.docker_host = dockerHostID;
         bean.interval = 60;
@@ -311,9 +317,9 @@ class DockerHost {
         await R.store(bean);
 
         if (newMonitor) {
-            await startMonitor(undefined, bean.id);
+            await startMonitor(userID, bean.id);
         } else if (await Monitor.isActive(bean.id, bean.active)) {
-            await restartMonitor(undefined, bean.id);
+            await restartMonitor(userID, bean.id);
         }
 
         const server = UptimeKumaServer.getInstance();
