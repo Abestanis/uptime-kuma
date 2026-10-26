@@ -1,16 +1,13 @@
 const axios = require("axios");
 const { R } = require("redbean-node");
 const https = require("https");
-const fsAsync = require("fs").promises;
-const path = require("path");
-const Database = require("./database");
-const { axiosAbortSignal, fsExists } = require("./util-server");
+const { axiosAbortSignal } = require("./util-server");
 const { setTimeout: sleep } = require('node:timers/promises');
-
+const { restartMonitor, startMonitor } = require("./monitor");
+const { UptimeKumaServer } = require("./uptime-kuma-server");
+const Monitor = require("./model/monitor");
+const DockerHostModel = require("./model/docker_host");
 class DockerHost {
-    static CertificateFileNameCA = "ca.pem";
-    static CertificateFileNameCert = "cert.pem";
-    static CertificateFileNameKey = "key.pem";
     /**
      * Map of Docker host IDs to their respective container change listeners.
      * @type {Map<number, {controller: AbortController, task: Promise<void>}>}
@@ -191,6 +188,8 @@ class DockerHost {
                         id: container.Id,
                         name: container.Names[0]?.replace(/^\//, ''), // Remove leading slash from container name
                         labels: container.Labels || {}
+                    }).catch((error) => {
+                        console.error(`Error processing container ${container.Id}change on Docker host ${dockerHost.dockerDaemon}:`, error);
                     });
                 }
 
@@ -213,6 +212,8 @@ class DockerHost {
                                 id: event.Actor.ID,
                                 name,
                                 labels
+                            }).catch((error) => {
+                                console.error(`Error processing container ${container.Id}change on Docker host ${dockerHost.dockerDaemon}:`, error);
                             });
                         }
                     }
@@ -293,12 +294,32 @@ class DockerHost {
     }
 
     static async onContainerUpdate(dockerHostID, container) {
-        let bean = await R.findOne("docker_host", " id = ? ", [dockerHostID]);
-        if (!bean) {
-            return;
+        const containerID = container.name || container.id;
+        let bean = await R.findOne("monitor", " type = 'docker' AND docker_container = ? AND docker_host = ? ", [containerID, dockerHostID]);
+        const newMonitor = !bean;
+        if (newMonitor) {
+            bean = R.dispense("monitor");
+            bean.type = "docker";
+            bean.name = containerID;
+        }
+        bean.docker_container = containerID;
+        bean.docker_host = dockerHostID;
+        bean.interval = 60;
+        bean.retryInterval = 60;
+
+        bean.validate();
+        await R.store(bean);
+
+        if (newMonitor) {
+            await startMonitor(undefined, bean.id);
+        } else if (await Monitor.isActive(bean.id, bean.active)) {
+            await restartMonitor(undefined, bean.id);
         }
 
-        console.log(`Container change detected on Docker host ${bean.docker_daemon}:`, container);
+        const server = UptimeKumaServer.getInstance();
+        for (const socket of server.io.sockets.sockets.values()) {
+            await server.sendUpdateMonitorIntoList(socket, bean.id);
+        }
     }
 }
 
