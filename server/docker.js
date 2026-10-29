@@ -207,11 +207,18 @@ class DockerHost {
                         }
                         const event = JSON.parse(line);
                         if (event.Type === "container") {
-                            const { name, ...labels } = event.Actor.Attributes;
+                            await sleep(500, undefined, { signal: cancelSignal }).catch(() => { }); // Wait a bit to ensure the container is fully created before fetching details
+                            let response;
+                            try {
+                                response = await axios.request({ ...requestOptions, url: `/containers/${event.Actor.ID}/json` });
+                            } catch (error) {
+                                console.debug(`Failed to fetch container ${event.Actor.ID} details on Docker host ${dockerHost.dockerDaemon}:`, error);
+                                continue;
+                            }
                             await onUpdate(dockerHost.id, {
-                                id: event.Actor.ID,
-                                name,
-                                labels
+                                id: response.Id,
+                                name: response.Name.replace(/^\//, ''), // Remove leading slash from container name
+                                labels: response.Config.Labels || {}
                             }).catch((error) => {
                                 console.error(`Error processing container ${container.Id} change on Docker host ${dockerHost.dockerDaemon}:`, error);
                             });
@@ -294,6 +301,7 @@ class DockerHost {
     }
 
     static async onContainerUpdate(dockerHostID, container) {
+        console.error(`onContainerUpdate: ${container}`); // TODO: Remove
         const docker = await R.findOne("docker_host", " id = ? ", [dockerHostID]);
         if (!docker) {
             throw new Error("docker host not found");
